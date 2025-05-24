@@ -14,11 +14,19 @@ const upload = multer({
 });
 
 // Initialize OpenAI client
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const openai = new OpenAI({ 
+  apiKey: process.env.OPENAI_API_KEY,
+  timeout: 30000 // 30 seconds
+});
 
 // Middleware
 app.use(cors());
 app.use(express.json());
+
+// Root route for testing
+app.get('/', (req, res) => {
+  res.status(200).json({ message: 'SceneFinder backend is running' });
+});
 
 // Ensure uploads directory exists
 const uploadDir = path.join(__dirname, 'Uploads');
@@ -28,12 +36,13 @@ if (!fs.existsSync(uploadDir)) {
 
 // Upload endpoint
 app.post('/api/upload', upload.single('video'), async (req, res) => {
+  let tempFilePath = '';
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No video file uploaded' });
     }
 
-    // Log file details for debugging
+    // Log file details
     console.log('Uploaded file:', {
       originalName: req.file.originalname,
       mimetype: req.file.mimetype,
@@ -44,25 +53,28 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     // Validate file type
     const allowedTypes = ['video/mp4', 'video/quicktime', 'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/flac', 'audio/ogg', 'video/webm'];
     if (!allowedTypes.includes(req.file.mimetype)) {
-      fs.unlinkSync(req.file.path); // Clean up invalid file
+      fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: `Invalid file type. Only MP4, MOV, MP3, M4A, WAV, FLAC, OGG, and WEBM are supported. Got: ${req.file.mimetype}` });
     }
 
-    // Create a temporary file with the original extension
+    // Create temporary file
     const originalExt = path.extname(req.file.originalname).toLowerCase();
-    const tempFilePath = path.join(uploadDir, `temp-${Date.now()}${originalExt}`);
+    tempFilePath = path.join(uploadDir, `temp-${Date.now()}${originalExt}`);
     fs.renameSync(req.file.path, tempFilePath);
 
-    // Transcribe audio using Whisper
+    // Transcribe with Whisper
+    console.log('Starting Whisper transcription...');
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempFilePath),
       model: 'whisper-1',
     });
+    console.log('Transcription completed:', transcription.text);
 
-    // Clean up temporary file
+    // Clean up
     fs.unlinkSync(tempFilePath);
 
-   // Query GPT for scene details
+    // Query GPT-4o
+    console.log('Querying GPT-4o...');
     const prompt = `
       You are a movie analyst with expertise in identifying scenes from short video or audio clips. Given the following dialogue transcript, which may be fragmented, incomplete, or contain background noise, provide:
       - The name of the movie or series (or "Unknown" if not identifiable)
@@ -83,6 +95,7 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
 
     const sceneDetails = JSON.parse(gptResponse.choices[0].message.content);
+    console.log('GPT-4o response:', sceneDetails);
 
     res.status(200).json({
       success: true,
@@ -90,11 +103,14 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
   } catch (error) {
     console.error('Error processing upload:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    if (tempFilePath && fs.existsSync(tempFilePath)) {
+      fs.unlinkSync(tempFilePath);
+    }
+    res.status(500).json({ error: 'Internal server error', details: error.message });
   }
 });
 
-// Start server locally if not in Vercel
+// Start server locally
 if (process.env.NODE_ENV !== 'production') {
   app.listen(3000, () => {
     console.log('Server running on port 3000');
