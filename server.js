@@ -9,7 +9,7 @@ require('dotenv').config();
 
 const app = express();
 const upload = multer({ 
-  dest: 'Uploads/',
+  dest: '/opt/render/project/src/Uploads/', // Render disk path
   limits: { fileSize: 2 * 1024 * 1024 } // 2MB limit
 });
 
@@ -26,13 +26,23 @@ app.get('/', (req, res) => {
   res.status(200).json({ message: 'SceneFinder backend is running', apiKeySet: !!process.env.OPENAI_API_KEY });
 });
 
-const uploadDir = path.join(__dirname, 'Uploads');
+const uploadDir = '/opt/render/project/src/Uploads';
 if (!fs.existsSync(uploadDir)) {
   console.log('Creating Uploads directory');
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
-app.post('/api/upload', upload.single('video'), async (req, res) => {
+app.post('/api/upload', (req, res, next) => {
+  console.log('POST /api/upload route reached'); // Debug log
+  upload.single('video')(req, res, (err) => {
+    if (err) {
+      console.error('Multer error:', err.message);
+      return res.status(400).json({ error: 'File upload error', details: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
+  console.log('Processing /api/upload request'); // Debug log
   let tempFilePath = '';
   try {
     if (!req.file) {
@@ -43,7 +53,8 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     console.log('Uploaded file:', {
       originalName: req.file.originalname,
       mimetype: req.file.mimetype,
-      size: req.file.size
+      size: req.file.size,
+      path: req.file.path
     });
 
     const allowedTypes = ['audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/flac', 'audio/ogg'];
@@ -112,7 +123,7 @@ app.use((req, res) => {
   res.status(404).json({ error: 'Endpoint not found', path: req.url });
 });
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
