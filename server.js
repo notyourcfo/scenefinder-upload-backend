@@ -22,9 +22,19 @@ app.use(express.json());
 
 // Ensure uploads directory exists
 const uploadDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadDir)) {
-  fs.mkdirSync(uploadDir);
+try {
+  if (!fs.existsSync(uploadDir)) {
+    fs.mkdirSync(uploadDir, { recursive: true });
+  }
+} catch (error) {
+  console.error('Failed to create uploads directory:', error);
+  process.exit(1);
 }
+
+// Health check endpoint
+app.get('/', (req, res) => {
+  res.status(200).json({ status: 'OK', message: 'SceneFinder backend is running' });
+});
 
 // Upload endpoint
 app.post('/api/upload', upload.single('video'), async (req, res) => {
@@ -90,7 +100,7 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
   } catch (error) {
     console.error('Error processing upload:', error);
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message || 'Internal server error' });
   }
 });
 
