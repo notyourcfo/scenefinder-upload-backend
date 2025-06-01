@@ -250,10 +250,10 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
       console.log('GPT-4o could not identify the movie name. Falling back to SerpAPI search.');
 
       const fallbackPrompt = `
-        You are a movie analyst with expertise in identifying scenes from short video or audio clips. Given the following dialogue transcript, you were unable to identify the scene with high confidence. Now, use the provided tool (search_web_and_youtube) to search the web and YouTube for videos or content matching the dialogue. You MUST construct a query with the key dialogue snippet "put it in my box", include the known actor "Amanda Cerny", and add context like "summer camp" to narrow down the search (e.g., "put it in my box Amanda Cerny summer camp site:youtube.com"). If the initial search returns no relevant results, try a broader query like "Amanda Cerny summer camp movie scene site:youtube.com". Parse the search results to identify the movie, scene, characters, and timestamp. Prioritize the video title as the primary source of information for identifying the movie or series, as it often contains the most direct reference to the content (e.g., a title like "Rim Of The World Amanda Cerny" clearly indicates the movie "Rim of the World"). If the transcript is not available or cannot be fetched, rely on the video title first, then the snippet, to make an educated guess about the movie and scene—do not return "Unknown" for the movie_or_series field unless both the title and snippet provide no useful information about a movie or series. Focus on modern films or series (post-2000) with comedic, adventurous, or lighthearted elements, especially those set in environments like summer camps, schools, workplaces, or events where misunderstandings or casual banter might occur. If the information is insufficient for specific fields like characters or timestamp, return "Unknown" for those fields only.
+        You are a movie analyst with expertise in identifying scenes from short video or audio clips. Given the following dialogue transcript, you were unable to identify the scene with high confidence. Now, use the provided tool (search_web_and_youtube) to search the web and YouTube for videos or content matching the dialogue. First, construct a specific query with the key dialogue snippet "put it in my box", include the known actor "Amanda Cerny", and add context like "summer camp" to narrow down the search (e.g., "put it in my box Amanda Cerny summer camp site:youtube.com"). If the initial search returns no relevant YouTube video results (i.e., no results with a link containing "youtube.com/watch"), log "Initial SerpAPI search returned no relevant video results" and retry with a broader query like "Amanda Cerny summer camp movie scene site:youtube.com". Parse the search results to identify the movie, scene, characters, and timestamp. Prioritize the video title as the primary source of information for identifying the movie or series, as it often contains the most direct reference to the content (e.g., a title like "Rim Of The World Amanda Cerny" clearly indicates the movie "Rim of the World"). If the transcript is not available or cannot be fetched, rely on the video title first, then the snippet, to make an educated guess about the movie and scene—do not return "Unknown" for the movie_or_series field unless both the title and snippet provide no useful information about a movie or series. Focus on modern films or series (post-2000) with comedic, adventurous, or lighthearted elements, especially those set in environments like summer camps, schools, workplaces, or events where misunderstandings or casual banter might occur. If the information is insufficient for specific fields like characters or timestamp, return "Unknown" for those fields only.
 
         **Examples:**
-        - If the transcript is "I'm sorry what put it in my box just take it out and put it in my box", you MUST search for "put it in my box Amanda Cerny summer camp site:youtube.com". This might return a video titled "Rim Of The World Amanda Cerny". Use the title to identify the movie as "Rim of the World", even if the transcript cannot be fetched. The scene is early in the movie (e.g., "Approx. 00:03:00"), and characters are "Security Officer" and "Camper" based on context (a summer camp setting where devices are collected). The dialogue involves a comedic misunderstanding about placing a cell phone in a box, setting a lighthearted tone for the film.
+        - If the transcript is "I'm sorry what put it in my box just take it out and put it in my box", you MUST first search for "put it in my box Amanda Cerny summer camp site:youtube.com". This might return a video titled "Rim Of The World Amanda Cerny". Use the title to identify the movie as "Rim of the World", even if the transcript cannot be fetched. The scene is early in the movie (e.g., "Approx. 00:03:00"), and characters are "Security Officer" and "Camper" based on context (a summer camp setting where devices are collected). The dialogue involves a comedic misunderstanding about placing a cell phone in a box, setting a lighthearted tone for the film.
         - If the transcript is "We need to go deeper", search for "we need to go deeper Leonardo DiCaprio site:youtube.com". This might return a video titled "Inception (2010) - We Need to Go Deeper Scene". Use the title to identify the movie as "Inception", the scene around "Approx. 00:15:00", and characters as "Dom Cobb" and "Arthur".
 
         **Required JSON Format:**
@@ -297,6 +297,96 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
             if (parsedResponse.quota_exhausted) {
               console.log('Skipping further SerpAPI processing due to quota exhaustion.');
               break;
+            }
+
+            // Check if the search returned no relevant YouTube video results
+            if (!parsedResponse.results || parsedResponse.results.length === 0) {
+              console.log('Initial SerpAPI search returned no relevant video results. Retrying with broader query.');
+              // Retry with a broader query
+              const broaderQuery = 'Amanda Cerny summer camp movie scene site:youtube.com';
+              console.log('Retrying SerpAPI Query:', broaderQuery);
+              const retryResponse = await axios.get(SERPAPI_BASE_URL, {
+                params: {
+                  api_key: SERPAPI_KEY,
+                  q: broaderQuery,
+                  engine: 'google',
+                  num: 5,
+                },
+              });
+
+              const retryResults = retryResponse.data.organic_results || [];
+              console.log('Retry SerpAPI Results:', retryResults);
+
+              const retryYoutubeResults = retryResults.filter(result => result.link.includes('youtube.com/watch'));
+              if (!retryYoutubeResults.length) {
+                toolResponse = JSON.stringify({ results: [] });
+              } else {
+                const retryTopResult = retryYoutubeResults[0];
+                const retryVideoIdMatch = retryTopResult.link.match(/v=([^&]+)/);
+                const retryVideoId = retryVideoIdMatch ? retryVideoIdMatch[1] : null;
+
+                let retryTranscript = 'Transcript not fetched.';
+                if (retryVideoId) {
+                  try {
+                    const youtube = google.youtube({
+                      version: 'v3',
+                      auth: oauth2Client,
+                    });
+
+                    const captionsResponse = await youtube.captions.list({
+                      part: 'snippet',
+                      videoId: retryVideoId,
+                    });
+
+                    const captions = captionsResponse.data.items;
+                    const englishCaption = captions.find(caption => 
+                      caption.snippet.language === 'en' || caption.snippet.language === 'en-US'
+                    );
+
+                    if (englishCaption) {
+                      const isAutoGenerated = englishCaption.snippet.trackKind === 'asr';
+                      console.log(`Caption for Video ID ${retryVideoId}: Language=${englishCaption.snippet.language}, Auto-generated=${isAutoGenerated}`);
+
+                      if (isAutoGenerated) {
+                        retryTranscript = 'Auto-generated captions are not downloadable by third parties.';
+                      } else {
+                        try {
+                          const captionTrackResponse = await youtube.captions.download({
+                            id: englishCaption.id,
+                            tfmt: 'vtt',
+                          });
+
+                          const vttText = captionTrackResponse.data;
+                          retryTranscript = vttText
+                            .split('\n')
+                            .filter(line => !line.match(/^(WEBVTT|Kind:|Language:|\d+\n\d{2}:\d{2}:\d{2}\.\d{3} --> \d{2}:\d{2}:\d{2}\.\d{3})/))
+                            .filter(line => line.trim() !== '')
+                            .join(' ');
+                          console.log('YouTube Transcript for Video ID', retryVideoId, ':', retryTranscript);
+                        } catch (downloadError) {
+                          console.error('Error downloading YouTube transcript:', downloadError.message);
+                          retryTranscript = `Unable to download transcript: ${downloadError.message}`;
+                        }
+                      }
+                    } else {
+                      retryTranscript = 'No English captions available.';
+                    }
+                  } catch (error) {
+                    console.error('Error fetching YouTube transcript:', error.message);
+                    retryTranscript = 'Error fetching transcript.';
+                  }
+                }
+
+                toolResponse = JSON.stringify({
+                  results: [{
+                    title: retryTopResult.title,
+                    link: retryTopResult.link,
+                    snippet: retryTopResult.snippet,
+                    video_id: retryVideoId,
+                    transcript: retryTranscript,
+                  }]
+                });
+              }
             }
 
             messages.push({
