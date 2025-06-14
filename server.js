@@ -10,8 +10,10 @@ const { google } = require('googleapis');
 require('dotenv').config();
 
 const app = express();
+
+// Configure multer for memory storage instead of disk storage
 const upload = multer({ 
-  dest: 'uploads/',
+  storage: multer.memoryStorage(),
   limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
 });
 
@@ -21,17 +23,6 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 // Middleware
 app.use(cors());
 app.use(express.json());
-
-// Ensure uploads directory exists
-const uploadDir = path.join(__dirname, 'uploads');
-try {
-  if (!fs.existsSync(uploadDir)) {
-    fs.mkdirSync(uploadDir, { recursive: true });
-  }
-} catch (error) {
-  console.error('Failed to create uploads directory:', error);
-  process.exit(1);
-}
 
 // Health check endpoint
 app.get('/', (req, res) => {
@@ -176,19 +167,17 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     console.log('Uploaded file:', {
       originalName: req.file.originalname,
       mimetype: req.file.mimetype,
-      size: req.file.size,
-      path: req.file.path
+      size: req.file.size
     });
 
     const allowedTypes = ['video/mp4', 'video/quicktime', 'audio/mpeg', 'audio/mp4', 'audio/wav', 'audio/flac', 'audio/ogg', 'video/webm'];
     if (!allowedTypes.includes(req.file.mimetype)) {
-      fs.unlinkSync(req.file.path);
       return res.status(400).json({ error: `Invalid file type. Only MP4, MOV, MP3, M4A, WAV, FLAC, OGG, and WEBM are supported. Got: ${req.file.mimetype}` });
     }
 
-    const originalExt = path.extname(req.file.originalname).toLowerCase();
-    const tempFilePath = path.join(uploadDir, `temp-${Date.now()}${originalExt}`);
-    fs.renameSync(req.file.path, tempFilePath);
+    // Create a temporary file from the buffer
+    const tempFilePath = path.join('/tmp', `temp-${Date.now()}-${req.file.originalname}`);
+    fs.writeFileSync(tempFilePath, req.file.buffer);
 
     const transcription = await openai.audio.transcriptions.create({
       file: fs.createReadStream(tempFilePath),
@@ -196,6 +185,7 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
     console.log('Whisper Transcription:', transcription.text);
 
+    // Clean up the temporary file
     fs.unlinkSync(tempFilePath);
 
     const tools = [
@@ -419,14 +409,17 @@ app.post('/api/upload', upload.single('video'), async (req, res) => {
     });
   } catch (error) {
     console.error('Error processing upload:', error);
-    res.status(500).json({ error: error.message || 'Internal server error' });
+    res.status(500).json({ error: 'Error processing upload' });
   }
 });
 
-// Start server on Render-provided port or 3000 locally
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+// For local development
+if (process.env.NODE_ENV !== 'production') {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`Server is running on port ${PORT}`);
+  });
+}
 
+// Export the Express app for Vercel
 module.exports = app;
